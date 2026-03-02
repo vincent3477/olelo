@@ -1,6 +1,7 @@
 """
 References:
 https://chatgpt.com/share/69a37f14-bd48-8001-944f-434d019dc6d5 -- Validating a URL for the first time. 
+https://chatgpt.com/share/69a4d446-bf28-8001-a546-9303bc2ca6e4 -- Learning how to validate and download zoom recordings using webhooks.
 """
 
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
