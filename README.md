@@ -26,4 +26,13 @@ Eventually, the project will:
 - Enable **controlled experimentation** with reasoning, evaluation, and grounding
 - Provide a platform for studying **what models know, don’t know, and how they explain it**
 
+---
+
+## High level overview
+
+1. Wait for Zoom Webhook to fire. Zoom will send events, when a meeting is completed.
+2. After an event is sent, the pipeline will capture all audio files from the specific meeting session then transcribe (Whisper) and diarize (Pyannote) them.
+3. The diarizations will get matched with transcriptions based on timestamps.
+4. Gemma (in-house LM) recieves the merged transcripts and diarizations and gives a brief summary of the meeting.
+
 This project is intended primarily for **internal AIEA lab and academic use**.
