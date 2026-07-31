@@ -2,23 +2,30 @@
 reference - https://builtin.com/software-engineering-perspectives/discord-bot-python
 """
 
-
-
-
 import logging
 import sys, os
 import torch
-from transformers import WhisperFeatureExtractor
 import numpy as np
 import os
 import random
+import time
 import discord
+from discord.ext import commands
+import base64
+import hashlib
+import hmac
 import nltk
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
 import asyncio
 import spacy
+import requests
+from post_process import post_process_pipeline
+from agents import Agent, Runner, function_tool
+
+some_agent = Agent(name = "assistant", instructions = "You are a helpful assistant")
+
 nlp = spacy.load("en_core_web_sm")
 
 intents = discord.Intents.default()
@@ -27,14 +34,27 @@ intents.presences = False
 intents.messages = True
 intents.guild_messages = True
 intents.message_content = True
+processor = None
 
 import os
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
+ZOOM_WEBHOOK_SECRET = os.getenv("ZOOM_WEBHOOK_SECRET") 
+CLIENT_ID = os.getenv("ZOOM_CLIENT_ID")
+ACCOUNT_ID = os.getenv("ZOOM_ACCOUNT_ID")
+CLIENT_SECRET = os.getenv("ZOOM_CLIENT_SECRET")
+
+RETRYABLE_ERROR_CODES = { 408, 429, 500, 502, 503, 504}
+REDIRECT_CODES = {301, 302, 303, 307, 308}
+
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+
+
+
 print("File loaded. __name__ =", __name__)
 
-bot = discord.Client(intents = intents)
+bot = commands.Bot(command_prefix="!", intents = intents)
 
 app = FastAPI(title="sample")
 
@@ -46,7 +66,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.error("Unhandled exception occurred", exc_info=exc)
     return JSONResponse(status_code=500, content={"message": "Internal Server Error"})
 
-
+## Discord Bot
 def split_text(summary):
     print(" at aplit")
     doc = nlp(summary)
@@ -86,18 +106,27 @@ async def on_ready():
 	# PRINTS HOW MANY GUILDS / SERVERS THE BOT IS IN.
 	print("SampleDiscordBot is in " + str(guild_count) + " guilds.")
 
-# EVENT LISTENER FOR WHEN A NEW MESSAGE IS SENT TO A CHANNEL.
+
+
+@bot.command()
+async def ping(ctx, arg):
+    print(arg)
+    try:
+    # Set a strict 30-second timeout
+        result = await asyncio.wait_for(Runner.run(some_agent, arg), timeout=30.0)
+        s = result.final_output
+        await ctx.send(s)
+    except asyncio.TimeoutError:
+        print("Agent call timed out after 30 seconds!")
+        s = "Sorry, the assistant took too long to respond."
+    except Exception as e:
+        print(f"Agent error: {e}")
+        s = f"An error occurred: {e}"
+    print("finish")
 
 
 
-@bot.event
-async def on_message(message):
-	# CHECKS IF THE MESSAGE THAT WAS SENT IS EQUAL TO "HELLO".
     
-    if message.content == "hello":
-		# SENDS BACK A MESSAGE TO THE CHANNEL.
-
-        await send_transcripts(message)
 
 
 async def send_transcripts(message):
@@ -105,12 +134,13 @@ async def send_transcripts(message):
      
     channel = bot.get_channel(1506427721608073248)
     print("the chunky sending to chunks")
-    chunks = split_text(message)
+    await channel.send(message)
+    """chunks = split_text(message)
     
     for i in chunks:
         print("sending", i)
         await channel.send(i)
-
+    """
 
 async def run_discord_bot():
     print('STARTING DISCORD BOT')
@@ -133,8 +163,128 @@ async def run_bot():
     await bot.start(DISCORD_TOKEN)
 
 
+## Zoom webhook
+def get_access_token():
+    ## GET AN ACCESS TOKEN
+    credentials = f"{CLIENT_ID}:{CLIENT_SECRET}"
+    encoded_credentials = base64.b64encode(credentials.encode()).decode()
+
+    headers = {"Authorization": f"Basic {encoded_credentials}"}
+
+    url = f"https://zoom.us/oauth/token?grant_type=account_credentials&account_id={ACCOUNT_ID}"
+
+    response = requests.post(url, headers=headers)
+    response.raise_for_status()
+
+    return response.json()["access_token"]
+
+
+
+async def get_audio_file_summarize(body):
+    download_token = body["download_token"]
+    headers = {"Authorization": f"Bearer {download_token}"}
+    recording_files = body["payload"]["object"]['recording_files']
+
+
+    global processor
+
+    if processor == None:
+        raise Exception("Processor not initialized")
+    print(body)
+
+    s = processor.print_something()
+
+    await send_transcripts(s)
+
+
+    
+    
+
+    # Download each recording file
+    for f in recording_files:
+        record_name = f["id"]
+        extension = f["file_extension"].lower()
+        location = f["download_url"]
+        if extension == "m4a" or extension == "mp3":
+            for attempt in range(5):
+                try:  
+                    download_req_response = requests.get(location, headers=headers, stream=True, allow_redirects=False)
+                    
+                    if download_req_response in RETRYABLE_ERROR_CODES and download_req_response not in REDIRECT_CODES:
+                        raise RuntimeError(f"Error {download_req_response.status_code} while trying to request download")
+
+
+                    if download_req_response.status_code in REDIRECT_CODES:
+                        location = download_req_response.headers.get("Location")
+                        if not location:
+                            raise RuntimeError(f"No location header: {download_req_response.status_code}")
+                        continue
+
+
+                    download_req_response.raise_for_status()
+
+                    record_filename = f"{record_name}.{extension}"
+
+                    with open(record_filename, "wb") as file_out:
+                        for chunk in download_req_response.iter_content(chunk_size=8192):
+                            if chunk:
+                                file_out.write(chunk)
+
+                    
+
+
+                    fs = await asyncio.to_thread(post_process_pipeline.post_process(record_filename)) 
+
+
+                    await send_transcripts(fs)
+
+                    
+                    
+                    break # Finish execution when everything went successfully.
+                
+                except RuntimeError as e:
+                    print(e)
+                    time.sleep(5)
+                    if attempt == 4:
+                        print("This is the last retry. Quitting.")
+                        break
+
+                except Exception as e:
+                    print(e)
+                    return 1
+    
+    return 0
+
+@app.post("/webhook")
+async def zoom_webhook(request: Request, background_tasks: BackgroundTasks):
+
+    body = await request.json()
+    print(body)
+    if body.get("event") == "endpoint.url_validation": ## WEBHOOK VALIDATION
+
+        key = ZOOM_WEBHOOK_SECRET.encode()
+
+        plain_token = body["payload"]["plainToken"]
+        message = plain_token.encode()
+
+        encrypted_token = hmac.new(key, message, hashlib.sha256).hexdigest()
+        # hash digest is the fixed-size binary output from a crypto hash function (but this time we are doing a hex string format)
+
+        return {"plainToken":plain_token, "encryptedToken":encrypted_token}
+    
+    if body.get("event") == "meeting.ended": ## MEETING RECORDING RECEIVED
+        print("recording was done")
+        background_tasks.add_task(get_audio_file_summarize, body)
+
+        return {"ok": True}
+
+
+
 async def main():
-    print('RUNNING MAIN')
+
+    global processor
+    processor = await asyncio.to_thread(post_process_pipeline)
+    
     await asyncio.gather(
         run_bot(),
         run_api(),
@@ -143,5 +293,4 @@ async def main():
 
 
 if __name__ == "discord_bot":
-    print("Running now")
     asyncio.run(main())
