@@ -22,8 +22,13 @@ import requests
 from post_process import post_process_pipeline
 from agents import Agent, Runner, function_tool
 from pymongo import MongoClient
+os.environ["KMP_DUPLICATE_OK"] = "TRUE"
+# standard practice if working in multi-threaded environments
+os.environ["OMP_NUM_THREADS"] = "1" 
 import faiss
 from sentence_transformers import SentenceTransformer
+import random
+
 
 client = MongoClient("mongodb://localhost:27017/")
 db = client["meeting_database"]
@@ -75,7 +80,6 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.error("Unhandled exception occurred", exc_info=exc)
     return JSONResponse(status_code=500, content={"message": "Internal Server Error"})
 
-
 async def embed_summary(id: str, meeting_name: str, summary_body:str):
     global dimensions
 
@@ -85,42 +89,55 @@ async def embed_summary(id: str, meeting_name: str, summary_body:str):
         index = faiss.read_index(filename)
         # grab the file
         embeddings = model.encode(summary_body, batch_size= 16)
+        if embeddings.ndim == 1:
+            embeddings = np.expand_dims(embeddings, axis = 0)
         embeddings = np.ascontiguousarray(embeddings, dtype=np.float32)
-        id_array = np.array(np.array(id),dtype=np.int64)
+        id_array = np.array(np.array([id]),dtype=np.int64)
         index.add_with_ids(embeddings, id_array)
     else:
         index = faiss.IndexIDMap(faiss.IndexFlatL2(768))
         # grab the file
         embeddings = model.encode(summary_body, batch_size= 16)
+        if embeddings.ndim == 1:
+            embeddings = np.expand_dims(embeddings, axis = 0)
         embeddings = np.ascontiguousarray(embeddings, dtype=np.float32)
-        id_array = np.array(np.array(id),dtype=np.int64)
+        print(embeddings)
+        id_array = np.array(np.array([id]),dtype=np.int64)
         index.add_with_ids(embeddings, id_array)
 
     faiss.write_index(index, temp)
     os.replace(temp, filename)
+    return
 
 
 async def get_summary(meeting_name, query: str):
     query_embedding = model.encode(query)
+    if query_embedding.ndim == 1:
+        query_embedding = query_embedding.reshape(1, -1)
+    
+    
     filename = os.path.join("vector_db_store",meeting_name,"embeddings.bin")
+    print(filename)
     if os.path.exists(filename):
         index = faiss.read_index(filename)
-        d, i = index.search(np.array([query_embedding]), 5)
-
-    return 
+        
+        _, i = index.search(np.array(query_embedding), 1)
+        return i
+    return []
 
    
 
 
-async def store_meeting_sumamry(id: str, meeting_name: str, summary_body:str):
+async def store_meeting_summary(id: str, meeting_name: str, summary_body:str):
     global collection
     try:
         collection.insert_one({"meeting_id":id, "meeting_name": meeting_name, "summary_body":summary_body})
+        await embed_summary(id = id, meeting_name=meeting_name, summary_body=summary_body)
     except Exception as e:
-        print(e, file=sys.sterr)
+        print(e, file=sys.stderr)
 
 
-## Discord Bot
+## Discord Bot∂
 def split_text(summary):
     print(" at aplit")
     doc = nlp(summary)
@@ -163,13 +180,26 @@ async def on_ready():
 
 
 @bot.command()
-async def ping(ctx, arg):
-    print(arg)
+async def ping(ctx, meeting_name: str, query: str):
+    global collection
     try:
     # Set a strict 30-second timeout
-        result = await asyncio.wait_for(Runner.run(some_agent, arg), timeout=30.0)
-        s = result.final_output
-        await ctx.send(s)
+        indexes = await get_summary(meeting_name = meeting_name, query=query)
+        #result = await asyncio.wait_for(Runner.run(some_agent, arg), timeout=30.0)
+        if len(indexes) == 0:
+            await ctx.send("There is nothing n the db rn.")
+        else:
+            print(indexes)
+
+            c = collection.find({})
+
+            for i in indexes[0]:
+                summary = collection.find_one({"meeting_id":int(i)})
+            
+
+
+            #s = result.final_output
+                await send_transcripts(summary['summary_body'])
     except asyncio.TimeoutError:
         print("Agent call timed out after 30 seconds!")
         s = "Sorry, the assistant took too long to respond."
@@ -209,7 +239,7 @@ async def run_api():
         host="0.0.0.0",
         port=8000,
         loop="asyncio",
-        reload=False,
+        reload=True,
     )
     server = uvicorn.Server(config)
     await server.serve()
@@ -238,9 +268,9 @@ def get_access_token():
 
 
 async def get_audio_file_summarize(body):
-    download_token = body["download_token"]
-    headers = {"Authorization": f"Bearer {download_token}"}
-    recording_files = body["payload"]["object"]['recording_files']
+    #download_token = body["download_token"]
+    #headers = {"Authorization": f"Bearer {download_token}"}
+    #recording_files = body["payload"]["object"]['recording_files']
 
 
     global processor
@@ -251,12 +281,67 @@ async def get_audio_file_summarize(body):
 
     s = processor.print_something()
 
+    
+
+    s = """# # Meeting Summary
+
+**Topic:** Overview of Earth's Climate Systems and Recent Trends
+**Date:** August 6, 2026
+**Duration:** 75 minutes
+
+## Attendees
+
+* Dr. Laura Chen
+* Prof. Michael Ortiz
+* Sarah Kim
+* David Brooks
+* Nina Patel
+
+## Agenda
+
+* Review of Earth's major climate zones
+* Discussion of factors influencing climate
+* Recent observations and long-term trends
+* Public outreach and educational initiatives
+
+## Discussion
+
+The meeting began with a review of Earth's primary climate zones, including tropical, arid, temperate, continental, polar, and highland climates. Participants discussed how latitude, elevation, ocean currents, prevailing winds, and topography interact to produce distinct regional weather patterns.
+
+The group examined the role of major ocean circulation systems in regulating global temperatures. It was noted that warm and cold ocean currents influence coastal climates, while large-scale atmospheric circulation helps distribute heat and moisture around the planet.
+
+Attendees also discussed recent climate observations, including changes in average temperatures, precipitation patterns, and the frequency of certain extreme weather events in various regions. The group emphasized the importance of interpreting long-term climate records alongside short-term weather variability when communicating scientific findings.
+
+The conversation shifted to climate monitoring technologies, including satellite observations, weather stations, ocean buoys, and climate models. Participants highlighted the value of combining multiple data sources to improve understanding of global climate processes and to support research and forecasting efforts.
+
+Finally, the team discussed opportunities to improve public education by creating accessible materials that explain the difference between weather and climate, illustrate how Earth's climate system functions, and encourage informed discussions based on scientific evidence.
+
+## Decisions
+
+* Develop updated educational resources explaining Earth's climate systems.
+* Expand collaboration between researchers and educators on climate communication.
+* Continue monitoring long-term climate indicators using multiple observational datasets.
+
+## Action Items
+
+* **Dr. Chen:** Prepare a summary of recent climate observations for public outreach.
+* **Prof. Ortiz:** Review educational materials for scientific accuracy.
+* **Sarah:** Gather visual examples of major global climate zones.
+* **David:** Compile recent satellite and ocean monitoring data for the next meeting.
+* **Nina:** Draft a proposal for a climate education workshop aimed at high school students.
+
+## Next Meeting
+
+The team will reconvene next month to review progress on educational materials, discuss new observational data, and evaluate opportunities for collaboration with local schools and community organizations.
+"""
+
+    await store_meeting_summary(random.randint(1, 255), "Scrum_Meeting", s)
     await send_transcripts(s)
 
 
     
     
-
+    """
     # Download each recording file
     for f in recording_files:
         record_name = f["id"]
@@ -292,6 +377,8 @@ async def get_audio_file_summarize(body):
 
                     fs = await asyncio.to_thread(post_process_pipeline.post_process(record_filename)) 
 
+                    #await store_meeting_sumamry()
+
 
                     await send_transcripts(fs)
 
@@ -309,7 +396,7 @@ async def get_audio_file_summarize(body):
                 except Exception as e:
                     print(e)
                     return 1
-    
+    """
     return 0
 
 @app.post("/webhook")
