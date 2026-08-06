@@ -3,11 +3,9 @@ reference - https://builtin.com/software-engineering-perspectives/discord-bot-py
 """
 
 import logging
-import sys, os
-import torch
+import os
 import numpy as np
 import os
-import random
 import time
 import discord
 from discord.ext import commands
@@ -23,6 +21,9 @@ import spacy
 import requests
 from post_process import post_process_pipeline
 from agents import Agent, Runner, function_tool
+from pymongo import MongoClient
+
+client = MongoClient("mongodb://localhost:27017/")
 
 some_agent = Agent(name = "assistant", instructions = "You are a helpful assistant")
 
@@ -131,16 +132,19 @@ async def ping(ctx, arg):
 
 async def send_transcripts(message):
 	# CHECKS IF THE MESSAGE THAT WAS SENT IS EQUAL TO "HELLO".
+
+    channel_id = 1506427721608073248
      
-    channel = bot.get_channel(1506427721608073248)
-    print("the chunky sending to chunks")
-    await channel.send(message)
-    """chunks = split_text(message)
+    channel = bot.get_channel(channel_id)
     
+    chunks = split_text(message)
+    await bot.wait_until_ready()
     for i in chunks:
         print("sending", i)
         await channel.send(i)
-    """
+    
+
+   
 
 async def run_discord_bot():
     print('STARTING DISCORD BOT')
@@ -208,7 +212,7 @@ async def get_audio_file_summarize(body):
         if extension == "m4a" or extension == "mp3":
             for attempt in range(5):
                 try:  
-                    download_req_response = requests.get(location, headers=headers, stream=True, allow_redirects=False)
+                    download_req_response = await asyncio.to_thread(requests.get, location, headers=headers, stream=True, allow_redirects=False)
                     
                     if download_req_response in RETRYABLE_ERROR_CODES and download_req_response not in REDIRECT_CODES:
                         raise RuntimeError(f"Error {download_req_response.status_code} while trying to request download")
@@ -244,7 +248,7 @@ async def get_audio_file_summarize(body):
                 
                 except RuntimeError as e:
                     print(e)
-                    time.sleep(5)
+                    await asyncio.sleep(5)
                     if attempt == 4:
                         print("This is the last retry. Quitting.")
                         break
