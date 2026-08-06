@@ -6,7 +6,7 @@ import logging
 import os
 import numpy as np
 import os
-import time
+import sys
 import discord
 from discord.ext import commands
 import base64
@@ -22,8 +22,16 @@ import requests
 from post_process import post_process_pipeline
 from agents import Agent, Runner, function_tool
 from pymongo import MongoClient
+import faiss
+from sentence_transformers import SentenceTransformer
 
 client = MongoClient("mongodb://localhost:27017/")
+db = client["meeting_database"]
+collection = db["meeting_db_collection"]
+
+model = SentenceTransformer('sentence-transformers/msmarco-roberta-base-v2')
+
+dimensions = 768
 
 some_agent = Agent(name = "assistant", instructions = "You are a helpful assistant")
 
@@ -66,6 +74,51 @@ async def global_exception_handler(request: Request, exc: Exception):
     # This ensures the traceback is still printed to your terminal console
     logger.error("Unhandled exception occurred", exc_info=exc)
     return JSONResponse(status_code=500, content={"message": "Internal Server Error"})
+
+
+async def embed_summary(id: str, meeting_name: str, summary_body:str):
+    global dimensions
+
+    filename = os.path.join("vector_db_store",meeting_name,"embeddings.bin")
+    temp = os.path.join("vector_db_store",meeting_name,"embeddings.tmp")
+    if os.path.exists(filename):
+        index = faiss.read_index(filename)
+        # grab the file
+        embeddings = model.encode(summary_body, batch_size= 16)
+        embeddings = np.ascontiguousarray(embeddings, dtype=np.float32)
+        id_array = np.array(np.array(id),dtype=np.int64)
+        index.add_with_ids(embeddings, id_array)
+    else:
+        index = faiss.IndexIDMap(faiss.IndexFlatL2(768))
+        # grab the file
+        embeddings = model.encode(summary_body, batch_size= 16)
+        embeddings = np.ascontiguousarray(embeddings, dtype=np.float32)
+        id_array = np.array(np.array(id),dtype=np.int64)
+        index.add_with_ids(embeddings, id_array)
+
+    faiss.write_index(index, temp)
+    os.replace(temp, filename)
+
+
+async def get_summary(meeting_name, query: str):
+    query_embedding = model.encode(query)
+    filename = os.path.join("vector_db_store",meeting_name,"embeddings.bin")
+    if os.path.exists(filename):
+        index = faiss.read_index(filename)
+        d, i = index.search(np.array([query_embedding]), 5)
+
+    return 
+
+   
+
+
+async def store_meeting_sumamry(id: str, meeting_name: str, summary_body:str):
+    global collection
+    try:
+        collection.insert_one({"meeting_id":id, "meeting_name": meeting_name, "summary_body":summary_body})
+    except Exception as e:
+        print(e, file=sys.sterr)
+
 
 ## Discord Bot
 def split_text(summary):
