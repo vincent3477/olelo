@@ -28,6 +28,7 @@ os.environ["OMP_NUM_THREADS"] = "1"
 import faiss
 from sentence_transformers import SentenceTransformer
 import random
+from pydantic import Field, BaseModel
 
 
 client = MongoClient("mongodb://localhost:27017/")
@@ -125,7 +126,76 @@ async def get_summary(meeting_name, query: str):
         return i
     return []
 
-   
+
+async def summarize_meeting(transcripts: str, participant_list: str = None):
+    class TeamMemberUpdates(BaseModel):
+        speaker_id: str = Field(description = "ID of the speaker responsible for task/ project.")
+        project_name: str = Field(description = "The project they are assigned to (if stated)")
+        accomplishments: str = Field(description = "What they have accomplished")
+        to_do: str = Field(description="What are they planning to do next")
+        blockers: str = Field(description="their list of blockers, if any")
+
+    class MemberList(BaseModel):
+        list_of_persons: list[TeamMemberUpdates] = Field(description = "A list of all topics that were discussed")
+
+
+    class ProjectName(BaseModel):
+        project_name: str = Field("The name of the project") # this should be cross referenced from previous meeting notes
+        project_updates: str = Field("What are the updates regarding the project.")
+
+
+    class ProjectList(BaseModel):
+        project_list: list[ProjectName] = Field("List of all projects")
+
+
+
+    class NameAttributor(BaseModel):
+        person_name: str = Field("The real name of the person. None if cannot be attributed.")
+        speaker_id: str = Field("The speaker ID as provided in the transcript.")
+
+    class NameList(BaseModel):
+        name_list: list[NameAttributor] = Field("List of all attributed names")
+
+
+    member_extractor_instructions = """You are a meeting segmentation agent. Your job is to split the entire meeting into sections based on the speaker discussing their updates. 
+    You need to include the following details:
+    - the ID of the speaker (this field must be in the format Speaker_{id_here})
+    - The name of the project or projects they are assigned to
+    - What they have accomplished in which project
+    - What are their next plans in which project
+    - What blockers do they have (if any)
+    Please do not attribute names that may be present in the transcript to the speaker id. 
+
+    For each 
+    Return a json format
+    """
+    meeting_seg_agent = Agent(name = "Meeting Segmentation Agent", instructions=member_extractor_instructions, output_type=MemberList)
+
+
+    segmented_output = Runner.run_sync(starting_agent = meeting_seg_agent, input = f"Segment this meeting f{transcripts}").final_output
+    print(segmented_output)
+
+
+
+
+    person_name_extractor = """You are a name extractor agent. You are responsible for matching person names against speaker ID based on the context in the transcript. For example, when Speaker_1 says,
+    'My name is Vincent, then Speaker_1 is then attributed to Vincent. Another instance is if someone calls a different person to speak, then the next speaker is presumed to taking the name. You will 
+    be given a transcript and your role is to extract all person names, where possible and return a dictionary attributing all speaker IDs. If a speaker ID has no name attribution, then return None """
+    project_extraction_agent = Agent(name="Project extraction agent", instructions=person_name_extractor, output_type=NameList)
+    person_name_output = Runner.run_sync(project_extraction_agent, f"Extract names here: {transcripts}").final_output
+
+    print(person_name_output)
+
+
+    project_extractor_instructions = """You are the project extractor agent. Your respnsibility is to extract all projects that were mentioned in the above mentioned speaker-specific summary"""
+    project_extraction_agent = Agent(name="Project extraction agent", instructions=project_extractor_instructions, output_type=ProjectList)
+    output = Runner.run_sync(project_extraction_agent, f"extract here {segmented_output}").final_output
+
+    print(output)
+
+    return output
+    
+
 
 
 async def store_meeting_summary(id: str, meeting_name: str, summary_body:str):
