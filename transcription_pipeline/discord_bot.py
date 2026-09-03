@@ -29,6 +29,7 @@ import faiss
 from sentence_transformers import SentenceTransformer
 import random
 from pydantic import Field, BaseModel
+from llm_ext_prompts import create_transcription_person_summary
 
 
 client = MongoClient("mongodb://localhost:27017/")
@@ -150,11 +151,117 @@ async def summarize_meeting(transcripts: str, participant_list: str = None):
 
 
     class NameAttributor(BaseModel):
-        person_name: str = Field("The real name of the person. None if cannot be attributed.")
-        speaker_id: str = Field("The speaker ID as provided in the transcript.")
+        person_name: str = Field( description="The real name of the person. leave as 'speaker_{int}' if it cannot be attributed.")
+        speaker_id: str = Field(pattern=r"^speaker_\d{2}$", description="The speaker ID as provided in the transcript.")
+        reason_for_matching: str = Field(format, description="A concrete explanation of why you matched speaker_ID with the name of the person")
 
     class NameList(BaseModel):
         name_list: list[NameAttributor] = Field("List of all attributed names")
+
+    name_attribute_instructions = """
+        You are a speaker-name attribution agent.
+    
+        Your task is to match speaker IDs in a meeting transcript to the correct
+        participant names using evidence found in the transcript.
+    
+        You will be given:
+    
+        1. A comma-separated list of possible meeting participants.
+        2. A transcript containing speaker IDs and their utterances.
+    
+        Your goal is to return a dictionary mapping each speaker ID to a person name.
+    
+        IMPORTANT PRINCIPLE:
+        Only assign a name to a speaker when there is sufficient evidence in the
+        transcript to support the attribution.
+    
+        Do NOT guess. If the evidence is weak, ambiguous, indirect, or contradictory,
+        leave the speaker's name empty.
+    
+        ====================
+        VALID EVIDENCE
+        ====================
+    
+        Strong evidence includes:
+    
+        1. Self-identification
+        Example:
+        Speaker_01: "Hi everyone, my name is Vincent."
+    
+        Result:
+        Speaker_01 -> "Vincent"
+    
+        2. Direct identification by another speaker
+        Example:
+        Speaker_02: "Vincent, what do you think?"
+        Speaker_01: "I think we should continue."
+    
+        This may support Speaker_01 -> "Vincent" ONLY if the conversational
+        context clearly indicates that Speaker_01 is responding to being addressed.
+    
+        3. Explicit introduction
+        Example:
+        Speaker_03: "This is AJ, and I'll be presenting today."
+    
+        Result:
+        Speaker_03 -> "AJ"
+    
+        4. A speaker being explicitly called upon and immediately responding
+        Example:
+        Speaker_01: "AJ, can you give us your update?"
+        Speaker_04: "Sure. I finished the task yesterday."
+    
+        This is strong contextual evidence that Speaker_04 may be "AJ",
+        provided there is no ambiguity.
+    
+        ====================
+        INSUFFICIENT EVIDENCE
+        ====================
+    
+        Do NOT assign a name based only on:
+    
+        - Writing style
+        - Topic knowledge
+        - Personality
+        - Assumptions about gender
+        - Frequency of speaking
+        - The order of names in the participant list
+        - A name merely appearing somewhere in the transcript
+        - Weak conversational guesses
+        - A speaker responding when it is unclear who was being addressed
+    
+        If multiple people could reasonably match a speaker, leave the speaker empty.
+    
+        ====================
+        CONSTRAINTS
+        ====================
+    
+        - Each speaker ID can be assigned to AT MOST one person.
+        - Each person can be assigned to AT MOST one speaker ID.
+        - Only use names from the provided participant list.
+        - Do not invent names.
+        - If a speaker cannot be identified with sufficient confidence, speaker id for that speaker.
+        - Evidence in the transcript takes priority over assumptions.
+        - If evidence conflicts, do not assign the name unless the conflict can be
+        clearly resolved.
+        """
+    attribute_extraction_agent = Agent(name="Name attribute extractor", instructions=name_attribute_instructions, output_type=NameList)
+    person_name_output = Runner.run_sync(attribute_extraction_agent, f"extract here {raw_transcript}").final_output
+
+    print(person_name_output)
+
+    attributed_transcript = raw_transcript
+
+    try:
+        for item in person_name_output.name_list:
+            print(type(item.speaker_id))
+            if item.speaker_id != "":
+                raw_transcript = attributed_transcript.lower().replace(item.speaker_id, item.person_name)
+    except:
+        validated_container = NameList.model_validate_json(person_name_output)
+        for item in validated_container.name_list:
+            print(item.person_name, item.speaker_id)
+
 
 
     member_extractor_instructions = """You are a meeting segmentation agent. Your job is to split the entire meeting into sections based on the speaker discussing their updates. 
@@ -169,31 +276,28 @@ async def summarize_meeting(transcripts: str, participant_list: str = None):
     For each 
     Return a json format
     """
-    meeting_seg_agent = Agent(name = "Meeting Segmentation Agent", instructions=member_extractor_instructions, output_type=MemberList)
+    agent = Agent(name = "Meeting Segmentation Agent", instructions=member_extractor_instructions, output_type=MemberList)
+    raw_transcript = create_transcription_person_summary(transcripts=transcripts, list_participants=participant_list)
+    person_ind_updates = Runner.run_sync(starting_agent = agent, input = f"segment this meeting {attributed_transcript}").final_output
+    print(person_ind_updates)
 
 
-    segmented_output = Runner.run_sync(starting_agent = meeting_seg_agent, input = f"Segment this meeting f{transcripts}").final_output
-    print(segmented_output)
 
 
 
 
-    person_name_extractor = """You are a name extractor agent. You are responsible for matching person names against speaker ID based on the context in the transcript. For example, when Speaker_1 says,
-    'My name is Vincent, then Speaker_1 is then attributed to Vincent. Another instance is if someone calls a different person to speak, then the next speaker is presumed to taking the name. You will 
-    be given a transcript and your role is to extract all person names, where possible and return a dictionary attributing all speaker IDs. If a speaker ID has no name attribution, then return None """
-    project_extraction_agent = Agent(name="Project extraction agent", instructions=person_name_extractor, output_type=NameList)
-    person_name_output = Runner.run_sync(project_extraction_agent, f"Extract names here: {transcripts}").final_output
 
-    print(person_name_output)
+    
+
+    #print(person_name_output)
 
 
     project_extractor_instructions = """You are the project extractor agent. Your respnsibility is to extract all projects that were mentioned in the above mentioned speaker-specific summary"""
     project_extraction_agent = Agent(name="Project extraction agent", instructions=project_extractor_instructions, output_type=ProjectList)
-    output = Runner.run_sync(project_extraction_agent, f"extract here {segmented_output}").final_output
+    project_updates = Runner.run_sync(project_extraction_agent, f"extract here {person_ind_updates}").final_output
 
-    print(output)
+    return project_updates, person_ind_updates
 
-    return output
     
 
 
