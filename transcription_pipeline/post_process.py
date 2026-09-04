@@ -7,6 +7,41 @@ from pyannote.audio.pipelines.utils.hook import ProgressHook
 from pydub import AudioSegment
 from tempfile import TemporaryDirectory
 from transformers import AutoProcessor, AutoModelForImageTextToText
+from agents import Agent, Runner
+from openai import OpenAI
+from pydantic import BaseModel, Field, TypeAdapter
+from llm_ext_prompts import create_transcription_person_summary, get_member_attribute_prompt
+
+client = OpenAI()
+
+class TeamMemberUpdates(BaseModel):
+    speaker_id: str = Field(description = "ID of the speaker responsible for task/ project.")
+    project_name: str = Field(description = "The project they are assigned to (if stated)")
+    accomplishments: str = Field(description = "What they have accomplished")
+    to_do: str = Field(description="What are they planning to do next")
+    blockers: str = Field(description="their list of blockers, if any")
+
+class MemberList(BaseModel):
+    list_of_persons: list[TeamMemberUpdates] = Field(description = "A list of all topics that were discussed")
+
+
+class ProjectName(BaseModel):
+    project_name: str = Field("The name of the project") # this should be cross referenced from previous meeting notes
+    project_updates: str = Field("What are the updates regarding the project.")
+
+
+class ProjectList(BaseModel):
+    project_list: list[ProjectName] = Field("List of all projects")
+
+
+
+class NameAttributor(BaseModel):
+    person_name: str = Field( description="The real name of the person. leave as 'speaker_{int}' if it cannot be attributed.")
+    speaker_id: str = Field(pattern=r"^speaker_\d{2}$", description="The speaker ID as provided in the transcript.")
+    reason_for_matching: str = Field(format, description="A concrete explanation of why you matched speaker_ID with the name of the person")
+
+class NameList(BaseModel):
+    name_list: list[NameAttributor] = Field("List of all attributed names")
 
 class post_process_pipeline():
     def __init__(self):
@@ -158,7 +193,7 @@ class post_process_pipeline():
         return summary
 
 
-    def post_process(self, audio_file):
+    def post_process_gemma(self, audio_file):
         d, t = self.diar_transcribe(audio_file)
         merged = self.merge_trans_diar(d, t)
         chunk_transcripts = self.chunk_transcript(merged)
@@ -170,6 +205,128 @@ class post_process_pipeline():
         fs = self.generate_final_summary(chunk_summaries)
         print(fs)
         return fs
+
+    def post_process_openai(self, audio_file, list_participants = None) -> list[str]:
+
+        # creates a transcript, then uses openai api to summarize, then chunk meetings first by individual updates then sectioned into projects. 
+
+        d, t = self.diar_transcribe(audio_file)
+        merged = self.merge_trans_diar(d, t)
+
+        raw_transcript = create_transcription_person_summary(transcripts=merged, list_participants=list_participants)
+
+        #name_attribute_instructions = get_member_attribute_prompt()
+        #attribute_extraction_agent = Agent(name="Name attribute extractor", instructions=name_attribute_instructions, output_type=NameList)
+        #person_name_output = Runner.run_sync(attribute_extraction_agent, f"extract here {raw_transcript}").final_output
+
+        person_name_output = client.beta.chat.completions.parse(
+            model = "gpt-5-mini",
+            messages = [
+                {"role": "system", "content": get_member_attribute_prompt()},
+                {"role": "user", "content": f"You are given a list of participants and a raw transcript. Match names and speaker_id according to the systems instructions: {raw_transcript}"}
+            ],
+            format = NameList
+        )
+    
+        print(person_name_output)
+    
+        attributed_transcript = raw_transcript
+    
+        try:
+            for item in person_name_output.name_list:
+                print(type(item.speaker_id))
+                if item.speaker_id != "":
+                    raw_transcript = attributed_transcript.lower().replace(item.speaker_id, item.person_name)
+        except:
+            validated_container = NameList.model_validate_json(person_name_output)
+            for item in validated_container.name_list:
+                print(item.person_name, item.speaker_id)
+    
+    
+    
+        member_extractor_instructions = """You are a meeting segmentation agent. Your job is to split the entire meeting into sections based on the speaker discussing their updates. 
+        You need to include the following details:
+        - the ID of the speaker (this field must be in the format Speaker_{id_here})
+        - The name of the project or projects they are assigned to
+        - What they have accomplished in which project
+        - What are their next plans in which project
+        - What blockers do they have (if any)
+        Please do not attribute names that may be present in the transcript to the speaker id. 
+    
+        For each 
+        Return a json format
+        """
+
+        individual_updates = client.beta.chat.completions.parse(
+            model = "gpt-5-mini",
+            messages = [
+                {"role": "system", "content": member_extractor_instructions},
+                {"role": "user", "content": f"Given the instructions above, extract, by speaker, the name of the project(s), what they have accomplished, next plans, and blockers: {raw_transcript}"}
+            ],
+            format = MemberList
+        )
+
+        #agent = Agent(name = "Meeting Segmentation Agent", instructions=member_extractor_instructions, output_type=MemberList)
+        
+        #person_ind_updates = Runner.run_sync(starting_agent = agent, input = f"segment this meeting {attributed_transcript}").final_output
+        print(individual_updates)
+
+
+      
+
+        project_extractor_instructions = """You are the project extractor agent. Your respnsibility is to extract all projects that were mentioned in the above mentioned speaker-specific summary"""
+        #project_extraction_agent = Agent(name="Project extraction agent", instructions=project_extractor_instructions, output_type=ProjectList)
+        #project_updates = Runner.run_sync(project_extraction_agent, f"extract here {individual_updates}").final_output
+
+        project_updates = client.beta.chat.completions.parse(
+            model = "gpt-5-mini",
+            messages = [
+                {"role": "system", "content": project_extractor_instructions},
+                {"role": "user", "content": f"Given the instructions above, extract all projects that were given in the individual updates summary: {individual_updates}"}
+            ],
+            format = ProjectList
+        )
+
+        final_proj_lists = []
+        final_string = ""
+
+
+        for item in project_updates.project_list:
+            if len(item.project_name) + len(item.project_updates) + len(final_string) < 1950:
+                final_string += item.project_name + "\n"
+                final_string += item.project_updates + "\n\n"
+            else:
+                final_proj_lists.append(final_string)
+                final_string = ""
+
+        if len(final_string) > 0:
+            final_proj_lists.append(final_string)
+
+        final_pers_lists = []
+        final_string = ""
+
+        for item in individual_updates.list_of_persons:
+            if len(item.speaker_id) + len(item.project_name) + len(item.accomplishments) + len(item.to_do) + len(item.blockers) +  len(final_string) < 1950:
+                final_string += item.speaker_id + "\n"
+                final_string += item.project_name + "\n"
+                final_string += item.accomplishments + "\n"
+                final_string += item.to_do + "\n"
+                final_string += item.blockers + "\n\n"
+            else:
+                final_pers_lists.append(final_string)
+                final_string = ""
+        if len(final_string) > 0:
+            final_pers_lists.append(final_string)
+
+
+        
+
+            
+
+
+        return  final_proj_lists, final_pers_lists
+    
+
 
     def print_something(self):
         return "this was returned."

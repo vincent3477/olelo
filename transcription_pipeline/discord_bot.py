@@ -128,180 +128,6 @@ async def get_summary(meeting_name, query: str):
     return []
 
 
-async def summarize_meeting(transcripts: str, participant_list: str = None):
-    class TeamMemberUpdates(BaseModel):
-        speaker_id: str = Field(description = "ID of the speaker responsible for task/ project.")
-        project_name: str = Field(description = "The project they are assigned to (if stated)")
-        accomplishments: str = Field(description = "What they have accomplished")
-        to_do: str = Field(description="What are they planning to do next")
-        blockers: str = Field(description="their list of blockers, if any")
-
-    class MemberList(BaseModel):
-        list_of_persons: list[TeamMemberUpdates] = Field(description = "A list of all topics that were discussed")
-
-
-    class ProjectName(BaseModel):
-        project_name: str = Field("The name of the project") # this should be cross referenced from previous meeting notes
-        project_updates: str = Field("What are the updates regarding the project.")
-
-
-    class ProjectList(BaseModel):
-        project_list: list[ProjectName] = Field("List of all projects")
-
-
-
-    class NameAttributor(BaseModel):
-        person_name: str = Field( description="The real name of the person. leave as 'speaker_{int}' if it cannot be attributed.")
-        speaker_id: str = Field(pattern=r"^speaker_\d{2}$", description="The speaker ID as provided in the transcript.")
-        reason_for_matching: str = Field(format, description="A concrete explanation of why you matched speaker_ID with the name of the person")
-
-    class NameList(BaseModel):
-        name_list: list[NameAttributor] = Field("List of all attributed names")
-
-    name_attribute_instructions = """
-        You are a speaker-name attribution agent.
-    
-        Your task is to match speaker IDs in a meeting transcript to the correct
-        participant names using evidence found in the transcript.
-    
-        You will be given:
-    
-        1. A comma-separated list of possible meeting participants.
-        2. A transcript containing speaker IDs and their utterances.
-    
-        Your goal is to return a dictionary mapping each speaker ID to a person name.
-    
-        IMPORTANT PRINCIPLE:
-        Only assign a name to a speaker when there is sufficient evidence in the
-        transcript to support the attribution.
-    
-        Do NOT guess. If the evidence is weak, ambiguous, indirect, or contradictory,
-        leave the speaker's name empty.
-    
-        ====================
-        VALID EVIDENCE
-        ====================
-    
-        Strong evidence includes:
-    
-        1. Self-identification
-        Example:
-        Speaker_01: "Hi everyone, my name is Vincent."
-    
-        Result:
-        Speaker_01 -> "Vincent"
-    
-        2. Direct identification by another speaker
-        Example:
-        Speaker_02: "Vincent, what do you think?"
-        Speaker_01: "I think we should continue."
-    
-        This may support Speaker_01 -> "Vincent" ONLY if the conversational
-        context clearly indicates that Speaker_01 is responding to being addressed.
-    
-        3. Explicit introduction
-        Example:
-        Speaker_03: "This is AJ, and I'll be presenting today."
-    
-        Result:
-        Speaker_03 -> "AJ"
-    
-        4. A speaker being explicitly called upon and immediately responding
-        Example:
-        Speaker_01: "AJ, can you give us your update?"
-        Speaker_04: "Sure. I finished the task yesterday."
-    
-        This is strong contextual evidence that Speaker_04 may be "AJ",
-        provided there is no ambiguity.
-    
-        ====================
-        INSUFFICIENT EVIDENCE
-        ====================
-    
-        Do NOT assign a name based only on:
-    
-        - Writing style
-        - Topic knowledge
-        - Personality
-        - Assumptions about gender
-        - Frequency of speaking
-        - The order of names in the participant list
-        - A name merely appearing somewhere in the transcript
-        - Weak conversational guesses
-        - A speaker responding when it is unclear who was being addressed
-    
-        If multiple people could reasonably match a speaker, leave the speaker empty.
-    
-        ====================
-        CONSTRAINTS
-        ====================
-    
-        - Each speaker ID can be assigned to AT MOST one person.
-        - Each person can be assigned to AT MOST one speaker ID.
-        - Only use names from the provided participant list.
-        - Do not invent names.
-        - If a speaker cannot be identified with sufficient confidence, speaker id for that speaker.
-        - Evidence in the transcript takes priority over assumptions.
-        - If evidence conflicts, do not assign the name unless the conflict can be
-        clearly resolved.
-        """
-    attribute_extraction_agent = Agent(name="Name attribute extractor", instructions=name_attribute_instructions, output_type=NameList)
-    person_name_output = Runner.run_sync(attribute_extraction_agent, f"extract here {raw_transcript}").final_output
-
-    print(person_name_output)
-
-    attributed_transcript = raw_transcript
-
-    try:
-        for item in person_name_output.name_list:
-            print(type(item.speaker_id))
-            if item.speaker_id != "":
-                raw_transcript = attributed_transcript.lower().replace(item.speaker_id, item.person_name)
-    except:
-        validated_container = NameList.model_validate_json(person_name_output)
-        for item in validated_container.name_list:
-            print(item.person_name, item.speaker_id)
-
-
-
-    member_extractor_instructions = """You are a meeting segmentation agent. Your job is to split the entire meeting into sections based on the speaker discussing their updates. 
-    You need to include the following details:
-    - the ID of the speaker (this field must be in the format Speaker_{id_here})
-    - The name of the project or projects they are assigned to
-    - What they have accomplished in which project
-    - What are their next plans in which project
-    - What blockers do they have (if any)
-    Please do not attribute names that may be present in the transcript to the speaker id. 
-
-    For each 
-    Return a json format
-    """
-    agent = Agent(name = "Meeting Segmentation Agent", instructions=member_extractor_instructions, output_type=MemberList)
-    raw_transcript = create_transcription_person_summary(transcripts=transcripts, list_participants=participant_list)
-    person_ind_updates = Runner.run_sync(starting_agent = agent, input = f"segment this meeting {attributed_transcript}").final_output
-    print(person_ind_updates)
-
-
-
-
-
-
-
-    
-
-    #print(person_name_output)
-
-
-    project_extractor_instructions = """You are the project extractor agent. Your respnsibility is to extract all projects that were mentioned in the above mentioned speaker-specific summary"""
-    project_extraction_agent = Agent(name="Project extraction agent", instructions=project_extractor_instructions, output_type=ProjectList)
-    project_updates = Runner.run_sync(project_extraction_agent, f"extract here {person_ind_updates}").final_output
-
-    return project_updates, person_ind_updates
-
-    
-
-
-
 async def store_meeting_summary(id: str, meeting_name: str, summary_body:str):
     global collection
     try:
@@ -386,8 +212,27 @@ async def ping(ctx, meeting_name: str, query: str):
 
     
 
+async def send_transcripts(message: str | list[str]):
+	# CHECKS IF THE MESSAGE THAT WAS SENT IS EQUAL TO "HELLO".
 
-async def send_transcripts(message):
+    channel_id = 1506427721608073248
+     
+    channel = bot.get_channel(channel_id)
+    if isinstance(message, str): 
+        chunks = split_text(message)
+        await bot.wait_until_ready()
+        for i in chunks:
+            print("sending", i)
+            await channel.send(i)
+
+    elif isinstance(message, list[str]): 
+        await bot.wait_until_ready()
+        for i in message:
+            print("sending", i)
+            await channel.send(i)
+
+
+async def send_transcripts_chunked(message):
 	# CHECKS IF THE MESSAGE THAT WAS SENT IS EQUAL TO "HELLO".
 
     channel_id = 1506427721608073248
@@ -442,9 +287,9 @@ def get_access_token():
 
 
 async def get_audio_file_summarize(body):
-    #download_token = body["download_token"]
-    #headers = {"Authorization": f"Bearer {download_token}"}
-    #recording_files = body["payload"]["object"]['recording_files']
+    download_token = body["download_token"]
+    headers = {"Authorization": f"Bearer {download_token}"}
+    recording_files = body["payload"]["object"]['recording_files']
 
 
     global processor
@@ -455,67 +300,15 @@ async def get_audio_file_summarize(body):
 
     s = processor.print_something()
 
-    
 
-    s = """# # Meeting Summary
-
-**Topic:** Overview of Earth's Climate Systems and Recent Trends
-**Date:** August 6, 2026
-**Duration:** 75 minutes
-
-## Attendees
-
-* Dr. Laura Chen
-* Prof. Michael Ortiz
-* Sarah Kim
-* David Brooks
-* Nina Patel
-
-## Agenda
-
-* Review of Earth's major climate zones
-* Discussion of factors influencing climate
-* Recent observations and long-term trends
-* Public outreach and educational initiatives
-
-## Discussion
-
-The meeting began with a review of Earth's primary climate zones, including tropical, arid, temperate, continental, polar, and highland climates. Participants discussed how latitude, elevation, ocean currents, prevailing winds, and topography interact to produce distinct regional weather patterns.
-
-The group examined the role of major ocean circulation systems in regulating global temperatures. It was noted that warm and cold ocean currents influence coastal climates, while large-scale atmospheric circulation helps distribute heat and moisture around the planet.
-
-Attendees also discussed recent climate observations, including changes in average temperatures, precipitation patterns, and the frequency of certain extreme weather events in various regions. The group emphasized the importance of interpreting long-term climate records alongside short-term weather variability when communicating scientific findings.
-
-The conversation shifted to climate monitoring technologies, including satellite observations, weather stations, ocean buoys, and climate models. Participants highlighted the value of combining multiple data sources to improve understanding of global climate processes and to support research and forecasting efforts.
-
-Finally, the team discussed opportunities to improve public education by creating accessible materials that explain the difference between weather and climate, illustrate how Earth's climate system functions, and encourage informed discussions based on scientific evidence.
-
-## Decisions
-
-* Develop updated educational resources explaining Earth's climate systems.
-* Expand collaboration between researchers and educators on climate communication.
-* Continue monitoring long-term climate indicators using multiple observational datasets.
-
-## Action Items
-
-* **Dr. Chen:** Prepare a summary of recent climate observations for public outreach.
-* **Prof. Ortiz:** Review educational materials for scientific accuracy.
-* **Sarah:** Gather visual examples of major global climate zones.
-* **David:** Compile recent satellite and ocean monitoring data for the next meeting.
-* **Nina:** Draft a proposal for a climate education workshop aimed at high school students.
-
-## Next Meeting
-
-The team will reconvene next month to review progress on educational materials, discuss new observational data, and evaluate opportunities for collaboration with local schools and community organizations.
-"""
-
-    await store_meeting_summary(random.randint(1, 255), "Scrum_Meeting", s)
-    await send_transcripts(s)
+    # need to change random rand int, as it this can cause hash collisions
+    #await store_meeting_summary(random.randint(1, 255), "Scrum_Meeting", s)
+    #await send_transcripts(s)
 
 
     
     
-    """
+    
     # Download each recording file
     for f in recording_files:
         record_name = f["id"]
@@ -549,12 +342,12 @@ The team will reconvene next month to review progress on educational materials, 
                     
 
 
-                    fs = await asyncio.to_thread(post_process_pipeline.post_process(record_filename)) 
+                    final_proj_lists, final_pers_lists = await asyncio.to_thread(post_process_pipeline.post_process_openai(audio_file=record_filename)) 
 
                     #await store_meeting_sumamry()
 
-
-                    await send_transcripts(fs)
+                    await send_transcripts(final_pers_lists)
+                    await send_transcripts(final_proj_lists)
 
                     
                     
@@ -570,7 +363,7 @@ The team will reconvene next month to review progress on educational materials, 
                 except Exception as e:
                     print(e)
                     return 1
-    """
+    
     return 0
 
 @app.post("/webhook")
