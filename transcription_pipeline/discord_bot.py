@@ -225,7 +225,7 @@ async def send_transcripts(message: str | list[str]):
             print("sending", i)
             await channel.send(i)
 
-    elif isinstance(message, list[str]): 
+    elif isinstance(message, list): 
         await bot.wait_until_ready()
         for i in message:
             print("sending", i)
@@ -287,9 +287,9 @@ def get_access_token():
 
 
 async def get_audio_file_summarize(body):
-    download_token = body["download_token"]
-    headers = {"Authorization": f"Bearer {download_token}"}
-    recording_files = body["payload"]["object"]['recording_files']
+    #download_token = body["download_token"]
+    #headers = {"Authorization": f"Bearer {download_token}"}
+    #recording_files = body["payload"]["object"]['recording_files']
 
 
     global processor
@@ -298,7 +298,22 @@ async def get_audio_file_summarize(body):
         raise Exception("Processor not initialized")
     print(body)
 
-    s = processor.print_something()
+
+    #with open(record_filename, "wb") as file_out:
+    #    for chunk in download_req_response.iter_content(chunk_size=8192):
+    #        if chunk:
+    #            file_out.write(chunk)
+
+    
+
+
+    final_proj_lists, final_pers_lists = await asyncio.to_thread(processor.post_process_openai,audio_file="sample_meeting_audio.m4a", list_participants=None)
+
+    #await store_meeting_sumamry()
+
+    await send_transcripts(final_pers_lists)
+    await send_transcripts(final_proj_lists)
+    
 
 
     # need to change random rand int, as it this can cause hash collisions
@@ -306,7 +321,7 @@ async def get_audio_file_summarize(body):
     #await send_transcripts(s)
 
 
-    
+    """
     
     
     # Download each recording file
@@ -363,6 +378,7 @@ async def get_audio_file_summarize(body):
                 except Exception as e:
                     print(e)
                     return 1
+                """
     
     return 0
 
