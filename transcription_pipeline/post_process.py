@@ -15,7 +15,7 @@ from llm_ext_prompts import create_transcription_person_summary, get_member_attr
 client = OpenAI()
 
 class TeamMemberUpdates(BaseModel):
-    speaker_id: str = Field(description = "ID of the speaker responsible for task/ project.")
+    speaker_id: str = Field(description = "ID or Name of the speaker responsible for task/ project. Format: Speaker_ID or <person_name>")
     project_name: str = Field(description = "The project they are assigned to (if stated)")
     accomplishments: str = Field(description = "What they have accomplished")
     to_do: str = Field(description="What are they planning to do next")
@@ -410,9 +410,9 @@ STOP
                 final_string = ""
 
         if len(final_string) > 0:
-            final_proj_lists.append(final_string)
+            final_proj_lists.append(final_string + "\n\n\n\n")
 
-        final_string += "\n\n\n\n"
+        
 
         final_pers_lists = []
         final_string = "# Individual Updates**\n\n"

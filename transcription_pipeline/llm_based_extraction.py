@@ -1,5 +1,5 @@
 from agents import Agent, Runner
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
 
 # fine grained topic segmentation
 """ segment interviews into smaller blocks based on topic shifts"""
@@ -8,15 +8,10 @@ from pydantic import BaseModel, Field
 
 # the extract is checked against the input. if there is no overlap, the value is considered a hallucination and is discarded.
 
-instructions = """You are a meeting segmentation agent. Your job is to split the entire meeting into sections based on topic changes
-Return a json format
-"""
-
-
 
 
 class TeamMemberUpdates(BaseModel):
-    person_name: str = Field(description = "The name of the person responsible for task/ project.")
+    speaker_id: str = Field(description = "ID of the speaker responsible for task/ project.")
     project_name: str = Field(description = "The project they are assigned to (if stated)")
     accomplishments: str = Field(description = "What they have accomplished")
     to_do: str = Field(description="What are they planning to do next")
@@ -26,12 +21,64 @@ class MemberList(BaseModel):
     list_of_persons: list[TeamMemberUpdates] = Field(description = "A list of all topics that were discussed")
 
 
+class ProjectName(BaseModel):
+    project_name: str = Field("The name of the project") # this should be cross referenced from previous meeting notes
+    project_updates: str = Field("What are the updates regarding the project.")
 
 
-agent = Agent(name = "Meeting Segmentation Agent", instructions=instructions, output_type=MemberList)
+class ProjectList(BaseModel):
+    project_list: list[ProjectName] = Field("List of all projects")
+
+
+
+class NameAttributor(BaseModel):
+    person_name: str = Field( description="The real name of the person. leave as 'speaker_{int}' if it cannot be attributed.")
+    speaker_id: str = Field(pattern=r"^speaker_\d{2}$", description="The speaker ID as provided in the transcript.")
+    reason_for_matching: str = Field(format, description="A concrete explanation of why you matched speaker_ID with the name of the person")
+
+class NameList(BaseModel):
+    name_list: list[NameAttributor] = Field("List of all attributed names")
+
+
+    
+"""
+REFERENCES
+
+Speaker 0: Hugo
+Speaker 1: Sergio
+Speaker 2: Zhonghui
+Speaker 3: Sebastian
+Speaker 4: leader
+Speaker 5: Chanchal
+Speaker 6: Guari
+Speaker 7: Benjamin
+Speaker 8: Vincent
+Speaker 9: AJ
+Speaker 
+"""
+
+
+member_extractor_instructions = """You are a meeting segmentation agent. Your job is to split the entire meeting into sections based on the speaker discussing their updates. 
+You need to include the following details:
+- the ID of the speaker (this field must be in the format Speaker_{id_here})
+- The name of the project or projects they are assigned to
+- What they have accomplished in which project
+- What are their next plans in which project
+- What blockers do they have (if any)
+Please do not attribute names that may be present in the transcript to the speaker id. 
+
+For each 
+Return a json format
+"""
+agent = Agent(name = "Meeting Segmentation Agent", instructions=member_extractor_instructions, output_type=MemberList)
 
 sum1 = """
-(0.0, 3.52)
+
+This is the persons and speakers ID's you need to match. You are given a comma separated value of participants and a transcript that follows
+
+Comma separated value of participants: Leilani, Vincent, Sebastian, AJ, Shripad, Jungway, Sergio, Benjamin, Hugo, Chanchal, Guary
+
+Transcript:
 START
 {'timestamp': (0.0, 3.52), 'text': " okay where's the reporting soon", 'speaker': 'SPEAKER_08'}
 {'timestamp': (3.52, 11.96), 'text': " i know zoom has changed a lot of stuff so yeah i usually don't use it as a host so", 'speaker': 'SPEAKER_04'}
@@ -137,6 +184,166 @@ STOP
 """
 
 
-output = Runner.run_sync(starting_agent = agent, input = f"segment this meeting {sum1}").final_output
 
-print(output)
+
+
+#print(segmented_output)
+
+
+
+
+
+
+
+person_name_extractor = """
+You are a speaker-name attribution agent.
+
+Your task is to match speaker IDs in a meeting transcript to the correct
+participant names using evidence found in the transcript.
+
+You will be given:
+
+1. A comma-separated list of possible meeting participants.
+2. A transcript containing speaker IDs and their utterances.
+
+Your goal is to return a dictionary mapping each speaker ID to a person name.
+
+IMPORTANT PRINCIPLE:
+Only assign a name to a speaker when there is sufficient evidence in the
+transcript to support the attribution.
+
+Do NOT guess. If the evidence is weak, ambiguous, indirect, or contradictory,
+leave the speaker's name empty.
+
+====================
+VALID EVIDENCE
+====================
+
+Strong evidence includes:
+
+1. Self-identification
+   Example:
+   Speaker_01: "Hi everyone, my name is Vincent."
+
+   Result:
+   Speaker_01 -> "Vincent"
+
+2. Direct identification by another speaker
+   Example:
+   Speaker_02: "Vincent, what do you think?"
+   Speaker_01: "I think we should continue."
+
+   This may support Speaker_01 -> "Vincent" ONLY if the conversational
+   context clearly indicates that Speaker_01 is responding to being addressed.
+
+3. Explicit introduction
+   Example:
+   Speaker_03: "This is AJ, and I'll be presenting today."
+
+   Result:
+   Speaker_03 -> "AJ"
+
+4. A speaker being explicitly called upon and immediately responding
+   Example:
+   Speaker_01: "AJ, can you give us your update?"
+   Speaker_04: "Sure. I finished the task yesterday."
+
+   This is strong contextual evidence that Speaker_04 may be "AJ",
+   provided there is no ambiguity.
+
+====================
+INSUFFICIENT EVIDENCE
+====================
+
+Do NOT assign a name based only on:
+
+- Writing style
+- Topic knowledge
+- Personality
+- Assumptions about gender
+- Frequency of speaking
+- The order of names in the participant list
+- A name merely appearing somewhere in the transcript
+- Weak conversational guesses
+- A speaker responding when it is unclear who was being addressed
+
+If multiple people could reasonably match a speaker, leave the speaker empty.
+
+====================
+CONSTRAINTS
+====================
+
+- Each speaker ID can be assigned to AT MOST one person.
+- Each person can be assigned to AT MOST one speaker ID.
+- Only use names from the provided participant list.
+- Do not invent names.
+- If a speaker cannot be identified with sufficient confidence, speaker id for that speaker.
+- Evidence in the transcript takes priority over assumptions.
+- If evidence conflicts, do not assign the name unless the conflict can be
+  clearly resolved.
+
+
+"""
+attribute_extraction_agent = Agent(name="Name attribute extractor", instructions=person_name_extractor, output_type=NameList)
+person_name_output = Runner.run_sync(attribute_extraction_agent, f"extract here {sum1}").final_output
+
+print(person_name_output)
+
+try:
+    for item in person_name_output.name_list:
+        print(type(item.speaker_id))
+        if item.speaker_id != "":
+            sum1 = sum1.lower().replace(item.speaker_id, item.person_name)
+    print(sum1)
+except:
+    validated_container = NameList.model_validate_json(person_name_output)
+    for item in validated_container.name_list:
+        print(item.person_name, item.speaker_id)
+
+
+segmented_output = Runner.run_sync(starting_agent = agent, input = f"segment this meeting {sum1}").final_output
+
+
+#print(person_name_output)
+
+
+project_extractor_instructions = """You are the project extractor agent. Your respnsibility is to extract all projects that were mentioned in the above mentioned speaker-specific summary"""
+project_extraction_agent = Agent(name="Project extraction agent", instructions=project_extractor_instructions, output_type=ProjectList)
+output = Runner.run_sync(project_extraction_agent, f"extract here {segmented_output}").final_output
+
+
+final_proj_lists = []
+final_string = ""
+
+print(type(segmented_output))
+
+for item in output.project_list:
+    if len(item.project_name) + len(item.project_updates) + len(final_string) < 1950:
+        final_string += item.project_name + "\n"
+        final_string += item.project_updates + "\n\n"
+    else:
+        final_proj_lists.append(final_string)
+        final_string = ""
+
+if len(final_string) > 0:
+    final_proj_lists.append(final_string)
+
+final_pers_lists = []
+final_string = ""
+
+for item in segmented_output.list_of_persons:
+    if len(item.speaker_id) + len(item.project_name) + len(item.accomplishments) + len(item.to_do) + len(item.blockers) +  len(final_string) < 1950:
+        final_string += item.speaker_id + "\n"
+        final_string += item.project_name + "\n"
+        final_string += item.accomplishments + "\n"
+        final_string += item.to_do + "\n"
+        final_string += item.blockers + "\n\n"
+    else:
+        final_pers_lists.append(final_string)
+        final_string = ""
+if len(final_string) > 0:
+    final_pers_lists.append(final_string)
+
+
+print(final_pers_lists)
+print(final_proj_lists)
